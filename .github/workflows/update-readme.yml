@@ -1,0 +1,74 @@
+name: Update README with .sh scripts list
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      with:
+        persist-credentials: false
+
+    - name: Setup Git for pushing with PAT
+      run: |
+        git config user.name "s7net"
+        git config user.email "s7net@users.noreply.github.com"
+        git remote set-url origin https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/s7net/scripts.git
+
+    - name: List .sh files in repo root
+      id: list_scripts
+      run: |
+        FILES=$(git ls-files '*.sh')
+        echo "files<<EOF" >> $GITHUB_OUTPUT
+        echo "$FILES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Generate new README section
+      id: gen_readme
+      run: |
+        echo "# scripts" > new_readme_section.md
+        echo "" >> new_readme_section.md
+        echo "### Scripts:" >> new_readme_section.md
+    
+        while IFS= read -r file; do
+          base=$(basename "$file" .sh)
+          echo "### $base :" >> new_readme_section.md
+          echo '```bash' >> new_readme_section.md
+          echo "bash <(curl -Ls https://shell.s7net.ir/$file)" >> new_readme_section.md
+          echo '```' >> new_readme_section.md
+          echo "" >> new_readme_section.md
+        done <<< "${{ steps.list_scripts.outputs.files }}"
+
+    - name: Update README.md
+      run: |
+        if [ ! -f README.md ]; then
+          echo "# scripts" > README.md
+          echo "" >> README.md
+          echo "<!-- scripts start -->" >> README.md
+          cat new_readme_section.md >> README.md
+          echo "<!-- scripts end -->" >> README.md
+        else
+          awk '
+          BEGIN {inblock=0}
+          /<!-- scripts start -->/ {print; system("cat new_readme_section.md"); inblock=1; next}
+          /<!-- scripts end -->/ {inblock=0; next}
+          inblock==0 {print}
+          ' README.md > README.new.md
+          mv README.new.md README.md
+        fi
+
+    - name: Commit changes
+      run: |
+        git add README.md
+        git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update README with latest .sh scripts list"
+
+    - name: Push changes
+      run: |
+        git push origin main
