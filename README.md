@@ -9,4 +9,3 @@
 bash <(curl -Ls https://shell.s7net.ir/installer/mikrotik.sh)
 ```
 
-<!-- scripts end -->
