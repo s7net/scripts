@@ -41,7 +41,7 @@ jobs:
           base=$(basename "$file" .sh)
           echo "### $base :" >> new_readme_section.md
           echo '```bash' >> new_readme_section.md
-          echo "bash <(curl -Ls https://shell.s7net.ir/$file)" >> new_readme_section.md
+          echo "bash <(curl -Ls https://script.s7net.ir/$file)" >> new_readme_section.md
           echo '```' >> new_readme_section.md
           echo "" >> new_readme_section.md
         done <<< "${{ steps.list_scripts.outputs.files }}"
