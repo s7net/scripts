@@ -1,6 +1,6 @@
 
 ### mikrotik :
 ```bash
-bash <(curl -Ls https://shell.s7net.ir/installer/mikrotik.sh)
+bash <(curl -Ls https://script.s7net.ir/installer/mikrotik.sh)
 ```
 
