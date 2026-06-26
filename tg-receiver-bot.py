@@ -204,7 +204,7 @@ async def run_bot(tmp_dir: Path) -> None:
         await event.reply(
             f"✅ `{file_name}` — {final_mb:.1f} MB in {elapsed:.0f}s "
             f"({avg_speed:.1f} MB/s avg)\n"
-            f"_Will be moved to final location on /done_",
+            f"Will be moved to final location on /done",
             parse_mode="md",
         )
         downloaded.append((tmp_dest, final_dest))
