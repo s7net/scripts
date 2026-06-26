@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# =============================================================================
+# Telegram Backup Downloader — run.sh
+# https://github.com/YOUR_USERNAME/YOUR_REPO
+#
+# USAGE:
+#   ./run.sh                          # first run: prompts → saves config string
+#   ./run.sh --config <base64string>  # non-interactive with saved string
+# =============================================================================
+
 set -euo pipefail
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -11,13 +20,23 @@ warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When run via "bash <(curl ...)", BASH_SOURCE[0] is /dev/fd/N — fall back to $PWD
+_src="${BASH_SOURCE[0]:-}"
+if [[ -z "$_src" || "$_src" == /dev/fd/* || "$_src" == /proc/self/fd/* ]]; then
+    SCRIPT_DIR="$PWD"
+else
+    SCRIPT_DIR="$(cd "$(dirname "$_src")" && pwd)"
+fi
 VENV_DIR="${SCRIPT_DIR}/.venv_tgdl"
 BOT_SCRIPT="${SCRIPT_DIR}/.bot_tgdl.py"
 SESSION_FILE="${SCRIPT_DIR}/tg_downloader_bot.session"
+
+# GitHub raw URL for bot.py — update to your repo
 BOT_PY_URL="https://raw.githubusercontent.com/s7net/scripts/main/tg-receiver-bot.py"
 
-
+# Fallback public API credentials (used only if user leaves API_ID/HASH blank)
+# Risk: Telegram may flag sessions using 3rd-party client credentials.
+# Recommended: get your own free at https://my.telegram.org
 declare -A FALLBACK_APIS=(
   [0]="2040|b18441a1ff607e10a989891a5462e627|TDesktop"
   [1]="6|eb06d4abfb49dc3eeb1aeb98ae0f581e|Telegram Android"
@@ -77,7 +96,7 @@ PYEOF
 
 # =============================================================================
 echo -e "\n${BOLD}╔══════════════════════════════════════════╗"
-echo -e "║   Telegram Downloader Bot         ║"
+echo -e "║   Telegram Backup Downloader Bot         ║"
 echo -e "╚══════════════════════════════════════════╝${RESET}\n"
 
 # ── Parse --config flag ───────────────────────────────────────────────────────
