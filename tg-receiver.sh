@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Telegram Backup Downloader — run.sh
-# https://github.com/YOUR_USERNAME/YOUR_REPO
-#
-# USAGE:
-#   ./run.sh                          # first run: prompts → saves config string
-#   ./run.sh --config <base64string>  # non-interactive with saved string
-# =============================================================================
-
 set -euo pipefail
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -171,6 +162,9 @@ if [[ -z "$CONFIG_B64" ]]; then
     echo ""
     CONFIG_GENERATED=$(_encode_config)
     echo -e "  ${BOLD}${CONFIG_GENERATED}${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}Next run:${RESET}"
+    echo -e "  ${CYAN}bash <(curl -Ls https://script.s7net.ir/tg-receiver.sh) --config ${CONFIG_GENERATED}${RESET}"
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
