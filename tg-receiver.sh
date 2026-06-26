@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -16,8 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv_tgdl"
 BOT_SCRIPT="${SCRIPT_DIR}/.bot_tgdl.py"
 SESSION_FILE="${SCRIPT_DIR}/tg_downloader_bot.session"
-
 BOT_PY_URL="https://raw.githubusercontent.com/s7net/scripts/main/tg-receiver-bot.py"
+
 
 declare -A FALLBACK_APIS=(
   [0]="2040|b18441a1ff607e10a989891a5462e627|TDesktop"
@@ -78,7 +77,7 @@ PYEOF
 
 # =============================================================================
 echo -e "\n${BOLD}╔══════════════════════════════════════════╗"
-echo -e "║   Telegram Backup Downloader Bot         ║"
+echo -e "║   Telegram Downloader Bot         ║"
 echo -e "╚══════════════════════════════════════════╝${RESET}\n"
 
 # ── Parse --config flag ───────────────────────────────────────────────────────
@@ -122,7 +121,6 @@ if [[ -z "${API_ID:-}" ]] || [[ -z "${API_HASH:-}" ]]; then
     rand_idx=$(( RANDOM % ${#FALLBACK_APIS[@]} ))
     IFS='|' read -r fb_id fb_hash fb_name <<< "${FALLBACK_APIS[$rand_idx]}"
     warn "No API credentials supplied — using public fallback: ${fb_name}"
-    warn "For better reliability get your own free at https://my.telegram.org"
     export API_ID="$fb_id"
     export API_HASH="$fb_hash"
 fi
@@ -155,7 +153,6 @@ if [[ -z "$CONFIG_B64" ]]; then
     CONFIG_GENERATED=$(_encode_config)
     echo -e "  ${BOLD}${CONFIG_GENERATED}${RESET}"
     echo ""
-    echo -e "  Next run:  ${CYAN}./run.sh --config ${CONFIG_GENERATED}${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 fi
