@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -60,8 +63,84 @@ type downloadTask struct {
 	location  tg.InputFileLocationClass
 }
 
+type configStruct struct {
+	APIID           string `json:"API_ID"`
+	APIHash         string `json:"API_HASH"`
+	BotToken        string `json:"BOT_TOKEN"`
+	AllowedChat     string `json:"ALLOWED_CHAT"`
+	DownloadDir     string `json:"DOWNLOAD_DIR"`
+	DownloadWorkers string `json:"DOWNLOAD_WORKERS"`
+}
+
+func loadConfigString(b64Str string) error {
+	decoded, err := base64.StdEncoding.DecodeString(b64Str)
+	if err != nil {
+		return err
+	}
+	var cfg configStruct
+	if err := json.Unmarshal(decoded, &cfg); err != nil {
+		return err
+	}
+	if cfg.APIID != "" {
+		os.Setenv("API_ID", cfg.APIID)
+	}
+	if cfg.APIHash != "" {
+		os.Setenv("API_HASH", cfg.APIHash)
+	}
+	if cfg.BotToken != "" {
+		os.Setenv("BOT_TOKEN", cfg.BotToken)
+	}
+	if cfg.AllowedChat != "" {
+		os.Setenv("ALLOWED_CHAT", cfg.AllowedChat)
+	}
+	if cfg.DownloadDir != "" {
+		os.Setenv("DOWNLOAD_DIR", cfg.DownloadDir)
+	}
+	if cfg.DownloadWorkers != "" {
+		os.Setenv("DOWNLOAD_WORKERS", cfg.DownloadWorkers)
+	}
+	return nil
+}
+
+func printConfigString() {
+	cfg := configStruct{
+		APIID:           strconv.Itoa(apiID),
+		APIHash:         apiHash,
+		BotToken:        botToken,
+		AllowedChat:     strconv.FormatInt(allowedChat, 10),
+		DownloadDir:     downloadDir,
+		DownloadWorkers: strconv.Itoa(downloadWorkers),
+	}
+	data, err := json.Marshal(cfg)
+	if err == nil {
+		b64Str := base64.StdEncoding.EncodeToString(data)
+		fmt.Println("")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("  Your config string (save this for next time):")
+		fmt.Println("")
+		fmt.Printf("  %s\n", b64Str)
+		fmt.Println("")
+		fmt.Println("  Next run:")
+		fmt.Printf("  bash <(curl -Ls https://script.s7net.ir/tg-receiver.sh) --config %s\n", b64Str)
+		fmt.Println("")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("")
+	}
+}
+
 func main() {
 	log.Println("Starting Telegram Backup Downloader Bot (Go version)...")
+
+	// Parse flags
+	var configB64 string
+	flag.StringVar(&configB64, "config", "", "base64 encoded JSON configuration string")
+	flag.Parse()
+
+	if configB64 != "" {
+		if err := loadConfigString(configB64); err != nil {
+			log.Fatalf("ERROR: Failed to load config from base64 string: %v", err)
+		}
+	}
 
 	// Parse environment variables
 	var err error
@@ -111,6 +190,11 @@ func main() {
 	// Create download directory
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		log.Fatalf("ERROR: Failed to create download directory %s: %v", downloadDir, err)
+	}
+
+	// Print config string if it wasn't supplied via flag
+	if configB64 == "" {
+		printConfigString()
 	}
 
 	// Setup context with cancellation and signal handling
