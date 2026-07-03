@@ -193,12 +193,12 @@ if [[ -z "$PYTHON" ]]; then
 fi
 success "Python: $($PYTHON --version)"
 
-# ── Ensure python3-venv ───────────────────────────────────────────────────────
-info "Checking python3-venv..."
+# ── Ensure python3-venv & ensurepip ───────────────────────────────────────────
+info "Checking python3-venv and ensurepip..."
 PY_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 
-if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
-    warn "python3-venv not found — installing..."
+if ! "$PYTHON" -c "import ensurepip" &>/dev/null 2>&1; then
+    warn "python3-venv or ensurepip not found — installing..."
     if command -v apt-get &>/dev/null; then
         if apt-cache show "python${PY_VER}-venv" &>/dev/null 2>&1; then
             sudo apt-get install -y "python${PY_VER}-venv"
@@ -207,11 +207,11 @@ if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
         fi
     elif command -v dnf &>/dev/null; then sudo dnf install -y python3-venv
     elif command -v yum &>/dev/null; then sudo yum install -y python3-venv
-    else error "Cannot install python3-venv. Run: sudo apt install python${PY_VER}-venv"; exit 1
+    else error "Cannot install python3-venv/ensurepip. Run: sudo apt install python${PY_VER}-venv"; exit 1
     fi
-    "$PYTHON" -m venv --help &>/dev/null 2>&1 || { error "python3-venv still unavailable."; exit 1; }
+    "$PYTHON" -c "import ensurepip" &>/dev/null 2>&1 || { error "python3-venv/ensurepip still unavailable."; exit 1; }
 fi
-success "python3-venv OK"
+success "python3-venv and ensurepip OK"
 
 # ── Download bot.py from GitHub ───────────────────────────────────────────────
 echo ""
