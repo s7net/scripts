@@ -24,6 +24,8 @@ SESSION_FILE="${SCRIPT_DIR}/tg_downloader_bot.session"
 
 # GitHub raw URL for bot.py — update to your repo
 BOT_PY_URL="https://raw.githubusercontent.com/s7net/scripts/main/tg-receiver-bot.py"
+# GitHub URL for the precompiled static Go bot binary
+GO_BIN_URL="https://github.com/s7net/scripts/releases/download/release/tg-receiver-bot"
 
 # Fallback public API credentials (used only if user leaves API_ID/HASH blank)
 # Risk: Telegram may flag sessions using 3rd-party client credentials.
@@ -168,6 +170,49 @@ if [[ -z "$CONFIG_B64" ]]; then
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
+fi
+
+# Detect and execute Go binary (auto-download from GitHub if missing on Linux)
+GO_BINARY="${SCRIPT_DIR}/tg-receiver-bot"
+
+if [[ ! -f "$GO_BINARY" && ! -f "${GO_BINARY}.exe" ]]; then
+    if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+        info "Go binary not found. Downloading precompiled static binary from GitHub..."
+        if command -v curl &>/dev/null; then
+            curl -fsSL "$GO_BIN_URL" -o "$GO_BINARY"
+        elif command -v wget &>/dev/null; then
+            wget -q "$GO_BIN_URL" -O "$GO_BINARY"
+        fi
+        if [[ -f "$GO_BINARY" ]]; then
+            chmod +x "$GO_BINARY"
+            success "Go binary downloaded successfully"
+        else
+            warn "Failed to download Go binary automatically."
+        fi
+    fi
+fi
+
+[[ -f "${GO_BINARY}.exe" ]] && GO_BINARY="${GO_BINARY}.exe"
+if [[ -f "$GO_BINARY" && -x "$GO_BINARY" ]]; then
+    info "Found compiled Go binary! Launching Go version..."
+    
+    # ── Instructions ──────────────────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}Ready!${RESET}"
+    echo -e "  1. Send your backup files to the bot in Telegram"
+    echo -e "  2. Send ${BOLD}/done${RESET} when finished — bot shuts down and cleans up"
+    echo ""
+    
+    # Run Go bot
+    API_ID="$API_ID" \
+    API_HASH="$API_HASH" \
+    BOT_TOKEN="$BOT_TOKEN" \
+    ALLOWED_CHAT="$ALLOWED_CHAT" \
+    DOWNLOAD_DIR="$DOWNLOAD_DIR" \
+    DOWNLOAD_WORKERS="$DOWNLOAD_WORKERS" \
+        "$GO_BINARY"
+    
+    exit 0
 fi
 
 # ── Ensure Python 3.9+ ────────────────────────────────────────────────────────
