@@ -18,14 +18,11 @@ if [[ -z "$_src" || "$_src" == /dev/fd/* || "$_src" == /proc/self/fd/* ]]; then
 else
     SCRIPT_DIR="$(cd "$(dirname "$_src")" && pwd)"
 fi
-VENV_DIR="${SCRIPT_DIR}/.venv_tgdl"
-BOT_SCRIPT="${SCRIPT_DIR}/.bot_tgdl.py"
 SESSION_FILE="${SCRIPT_DIR}/tg_downloader_bot.session"
 
-# GitHub raw URL for bot.py — update to your repo
-BOT_PY_URL="https://raw.githubusercontent.com/s7net/scripts/main/tg-receiver-bot.py"
-# GitHub URL for the precompiled static Go bot binary
-GO_BIN_URL="https://github.com/s7net/scripts/releases/download/release/tg-receiver-bot"
+# GitHub URLs for the precompiled static Go bot binaries
+GO_BIN_URL_AMD64="https://github.com/s7net/scripts/releases/download/release/tg-receiver-bot-amd64"
+GO_BIN_URL_ARM64="https://github.com/s7net/scripts/releases/download/release/tg-receiver-bot-arm64"
 
 # Fallback public API credentials (used only if user leaves API_ID/HASH blank)
 # Risk: Telegram may flag sessions using 3rd-party client credentials.
@@ -43,56 +40,17 @@ declare -A FALLBACK_APIS=(
 cleanup() {
     echo ""
     info "Cleaning up temporary files..."
-    [[ -f "$BOT_SCRIPT"   ]] && rm -f "$BOT_SCRIPT"   && success "Removed bot.py"
     [[ -f "$SESSION_FILE" ]] && rm -f "$SESSION_FILE" && success "Removed session file"
-    [[ -d "$VENV_DIR"     ]] && rm -rf "$VENV_DIR"    && success "Removed virtual environment"
     success "Done. Your files are in: ${DOWNLOAD_DIR:-$SCRIPT_DIR/downloads}"
 }
 trap cleanup EXIT
-
-# ── Config encode/decode helpers (pure bash + python3) ───────────────────────
-
-# Encode current env vars → base64 JSON string
-_encode_config() {
-    python3 - <<PYEOF
-import base64, json
-cfg = {
-    "API_ID":            "${API_ID}",
-    "API_HASH":          "${API_HASH}",
-    "BOT_TOKEN":         "${BOT_TOKEN}",
-    "ALLOWED_CHAT":      "${ALLOWED_CHAT}",
-    "DOWNLOAD_DIR":      "${DOWNLOAD_DIR}",
-    "DOWNLOAD_WORKERS":  "${DOWNLOAD_WORKERS}",
-}
-print(base64.b64encode(json.dumps(cfg).encode()).decode())
-PYEOF
-}
-
-# Decode base64 JSON string → export env vars
-_decode_config() {
-    local b64="$1"
-    python3 - <<PYEOF
-import base64, json, sys
-try:
-    cfg  = json.loads(base64.b64decode("${b64}").decode())
-    keys = ["API_ID","API_HASH","BOT_TOKEN","ALLOWED_CHAT","DOWNLOAD_DIR","DOWNLOAD_WORKERS"]
-    for k in keys:
-        v = cfg.get(k, "")
-        # escape any single-quotes in value for safe shell export
-        v = v.replace("'", "'\\''")
-        print(f"{k}='{v}'")
-except Exception as e:
-    print(f"DECODE_ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-}
 
 # =============================================================================
 echo -e "\n${BOLD}╔══════════════════════════════════════════╗"
 echo -e "║   Telegram Backup Downloader Bot         ║"
 echo -e "╚══════════════════════════════════════════╝${RESET}\n"
 
-# ── Parse --config flag ───────────────────────────────────────────────────────
+# ── Parse flags ──────────────────────────────────────────────────────────────
 CONFIG_B64=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -100,12 +58,6 @@ while [[ $# -gt 0 ]]; do
         *)        error "Unknown argument: $1"; exit 1 ;;
     esac
 done
-
-if [[ -n "$CONFIG_B64" ]]; then
-    info "Decoding config string..."
-    eval "$(_decode_config "$CONFIG_B64")"
-    success "Config loaded"
-fi
 
 # ── Prompt for any missing values ─────────────────────────────────────────────
 prompt_if_empty() {
@@ -122,79 +74,81 @@ prompt_if_empty() {
     fi
 }
 
-echo -e "${BOLD}Configuration${RESET}"
-echo -e "  ${YELLOW}Tip:${RESET} press Enter to use the default shown in [brackets]\n"
+if [[ -z "$CONFIG_B64" ]]; then
+    echo -e "${BOLD}Configuration${RESET}"
+    echo -e "  ${YELLOW}Tip:${RESET} press Enter to use the default shown in [brackets]\n"
 
-prompt_if_empty API_ID    "API ID    (my.telegram.org, or press Enter for public fallback)"
-prompt_if_empty API_HASH  "API HASH  (my.telegram.org, or press Enter for public fallback)" true
+    prompt_if_empty API_ID    "API ID    (my.telegram.org, or press Enter for public fallback)"
+    prompt_if_empty API_HASH  "API HASH  (my.telegram.org, or press Enter for public fallback)" true
 
-# ── If API_ID/HASH left blank → pick a random public one ─────────────────────
-if [[ -z "${API_ID:-}" ]] || [[ -z "${API_HASH:-}" ]]; then
-    rand_idx=$(( RANDOM % ${#FALLBACK_APIS[@]} ))
-    IFS='|' read -r fb_id fb_hash fb_name <<< "${FALLBACK_APIS[$rand_idx]}"
-    warn "No API credentials supplied — using public fallback: ${fb_name}"
-    export API_ID="$fb_id"
-    export API_HASH="$fb_hash"
+    # If API_ID/HASH left blank → pick a random public one
+    if [[ -z "${API_ID:-}" ]] || [[ -z "${API_HASH:-}" ]]; then
+        rand_idx=$(( RANDOM % ${#FALLBACK_APIS[@]} ))
+        IFS='|' read -r fb_id fb_hash fb_name <<< "${FALLBACK_APIS[$rand_idx]}"
+        warn "No API credentials supplied — using public fallback: ${fb_name}"
+        export API_ID="$fb_id"
+        export API_HASH="$fb_hash"
+    fi
+
+    prompt_if_empty BOT_TOKEN    "Bot Token    (@BotFather)" true
+    prompt_if_empty ALLOWED_CHAT "Your Chat ID (@userinfobot)"
+
+    # Defaults
+    export DOWNLOAD_DIR="${DOWNLOAD_DIR:-${SCRIPT_DIR}/downloads}"
+    export DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-10}"
+
+    # Validate
+    [[ "${API_ID}"       =~ ^[0-9]+$   ]] || { error "API_ID must be numeric.";    exit 1; }
+    [[ "${ALLOWED_CHAT}" =~ ^-?[0-9]+$ ]] || { error "ALLOWED_CHAT must be numeric."; exit 1; }
+    [[ -n "${API_HASH}"                ]] || { error "API_HASH is empty.";          exit 1; }
+    [[ -n "${BOT_TOKEN}"               ]] || { error "BOT_TOKEN is empty.";         exit 1; }
+else
+    export DOWNLOAD_DIR="${DOWNLOAD_DIR:-${SCRIPT_DIR}/downloads}"
 fi
-
-prompt_if_empty BOT_TOKEN    "Bot Token    (@BotFather)" true
-prompt_if_empty ALLOWED_CHAT "Your Chat ID (@userinfobot)"
-
-# Defaults
-export DOWNLOAD_DIR="${DOWNLOAD_DIR:-${SCRIPT_DIR}/downloads}"
-export DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-10}"
-
-echo ""
-
-# ── Validate ──────────────────────────────────────────────────────────────────
-[[ "${API_ID}"       =~ ^[0-9]+$   ]] || { error "API_ID must be numeric.";    exit 1; }
-[[ "${ALLOWED_CHAT}" =~ ^-?[0-9]+$ ]] || { error "ALLOWED_CHAT must be numeric."; exit 1; }
-[[ -n "${API_HASH}"                ]] || { error "API_HASH is empty.";          exit 1; }
-[[ -n "${BOT_TOKEN}"               ]] || { error "BOT_TOKEN is empty.";         exit 1; }
 
 info "Download directory : ${DOWNLOAD_DIR}"
-info "Parallel workers   : ${DOWNLOAD_WORKERS} chunks"
 mkdir -p "${DOWNLOAD_DIR}"
-
-# ── Generate & display config string (only on first run / no --config given) ──
-if [[ -z "$CONFIG_B64" ]]; then
-    echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "${GREEN}  Your config string (save this for next time):${RESET}"
-    echo ""
-    CONFIG_GENERATED=$(_encode_config)
-    echo -e "  ${BOLD}${CONFIG_GENERATED}${RESET}"
-    echo ""
-    echo -e "  ${YELLOW}Next run:${RESET}"
-    echo -e "  ${CYAN}bash <(curl -Ls https://script.s7net.ir/tg-receiver.sh) --config ${CONFIG_GENERATED}${RESET}"
-    echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo ""
-fi
 
 # Detect and execute Go binary (auto-download from GitHub if missing on Linux)
 GO_BINARY="${SCRIPT_DIR}/tg-receiver-bot"
 
 if [[ ! -f "$GO_BINARY" && ! -f "${GO_BINARY}.exe" ]]; then
-    if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
-        info "Go binary not found. Downloading precompiled static binary from GitHub..."
-        if command -v curl &>/dev/null; then
-            curl -fsSL "$GO_BIN_URL" -o "$GO_BINARY"
-        elif command -v wget &>/dev/null; then
-            wget -q "$GO_BIN_URL" -O "$GO_BINARY"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        ARCH="$(uname -m)"
+        URL=""
+        if [[ "$ARCH" == "x86_64" ]]; then
+            URL="$GO_BIN_URL_AMD64"
+        elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+            URL="$GO_BIN_URL_ARM64"
         fi
-        if [[ -f "$GO_BINARY" ]]; then
-            chmod +x "$GO_BINARY"
-            success "Go binary downloaded successfully"
+        
+        if [[ -n "$URL" ]]; then
+            info "Go binary not found. Downloading precompiled static binary for ${ARCH} from GitHub..."
+            if command -v curl &>/dev/null; then
+                curl -fsSL "$URL" -o "$GO_BINARY"
+            elif command -v wget &>/dev/null; then
+                wget -q "$URL" -O "$GO_BINARY"
+            fi
+            if [[ -f "$GO_BINARY" ]]; then
+                chmod +x "$GO_BINARY"
+                success "Go binary downloaded successfully"
+            else
+                error "Failed to download Go binary automatically."
+                exit 1
+            fi
         else
-            warn "Failed to download Go binary automatically."
+            error "Unsupported Linux architecture: ${ARCH}. Compile from source or install Go manually."
+            exit 1
         fi
+    else
+        error "Go binary not found. Please compile it on your system or run in WSL/Linux."
+        exit 1
     fi
 fi
 
 [[ -f "${GO_BINARY}.exe" ]] && GO_BINARY="${GO_BINARY}.exe"
 if [[ -f "$GO_BINARY" && -x "$GO_BINARY" ]]; then
-    info "Found compiled Go binary! Launching Go version..."
+    info "Launching Go version..."
     
     # ── Instructions ──────────────────────────────────────────────────────────
     echo ""
@@ -204,95 +158,21 @@ if [[ -f "$GO_BINARY" && -x "$GO_BINARY" ]]; then
     echo ""
     
     # Run Go bot
-    API_ID="$API_ID" \
-    API_HASH="$API_HASH" \
-    BOT_TOKEN="$BOT_TOKEN" \
-    ALLOWED_CHAT="$ALLOWED_CHAT" \
+    ARGS=()
+    if [[ -n "$CONFIG_B64" ]]; then
+        ARGS+=("--config" "$CONFIG_B64")
+    fi
+
+    API_ID="${API_ID:-}" \
+    API_HASH="${API_HASH:-}" \
+    BOT_TOKEN="${BOT_TOKEN:-}" \
+    ALLOWED_CHAT="${ALLOWED_CHAT:-}" \
     DOWNLOAD_DIR="$DOWNLOAD_DIR" \
-    DOWNLOAD_WORKERS="$DOWNLOAD_WORKERS" \
-        "$GO_BINARY"
+    DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-10}" \
+        "$GO_BINARY" "${ARGS[@]}"
     
     exit 0
+else
+    error "Go binary not executable: $GO_BINARY"
+    exit 1
 fi
-
-# ── Ensure Python 3.9+ ────────────────────────────────────────────────────────
-info "Checking Python..."
-PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
-        if "$cmd" -c "import sys; sys.exit(0 if sys.version_info>=(3,9) else 1)" 2>/dev/null; then
-            PYTHON="$cmd"; break
-        fi
-    fi
-done
-
-if [[ -z "$PYTHON" ]]; then
-    warn "Python 3.9+ not found — installing..."
-    if   command -v apt-get &>/dev/null; then sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip
-    elif command -v dnf     &>/dev/null; then sudo dnf install -y python3 python3-pip
-    elif command -v yum     &>/dev/null; then sudo yum install -y python3 python3-pip
-    elif command -v brew    &>/dev/null; then brew install python3
-    else error "Cannot install Python automatically. Install Python 3.9+ manually."; exit 1
-    fi
-    PYTHON="python3"
-fi
-success "Python: $($PYTHON --version)"
-
-# ── Ensure python3-venv & ensurepip ───────────────────────────────────────────
-info "Checking python3-venv and ensurepip..."
-PY_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-
-if ! "$PYTHON" -c "import ensurepip" &>/dev/null 2>&1; then
-    warn "python3-venv or ensurepip not found — installing..."
-    if command -v apt-get &>/dev/null; then
-        if apt-cache show "python${PY_VER}-venv" &>/dev/null 2>&1; then
-            sudo apt-get install -y "python${PY_VER}-venv"
-        else
-            sudo apt-get install -y python3-venv python3-pip
-        fi
-    elif command -v dnf &>/dev/null; then sudo dnf install -y python3-venv
-    elif command -v yum &>/dev/null; then sudo yum install -y python3-venv
-    else error "Cannot install python3-venv/ensurepip. Run: sudo apt install python${PY_VER}-venv"; exit 1
-    fi
-    "$PYTHON" -c "import ensurepip" &>/dev/null 2>&1 || { error "python3-venv/ensurepip still unavailable."; exit 1; }
-fi
-success "python3-venv and ensurepip OK"
-
-# ── Download bot.py from GitHub ───────────────────────────────────────────────
-echo ""
-info "Downloading bot.py..."
-if   command -v curl &>/dev/null; then curl -fsSL "$BOT_PY_URL" -o "$BOT_SCRIPT"
-elif command -v wget &>/dev/null; then wget -q "$BOT_PY_URL" -O "$BOT_SCRIPT"
-else "$PYTHON" -c "import urllib.request; urllib.request.urlretrieve('${BOT_PY_URL}','${BOT_SCRIPT}')"
-fi
-chmod +x "$BOT_SCRIPT"
-success "bot.py downloaded"
-
-# ── Venv + deps ───────────────────────────────────────────────────────────────
-echo ""
-info "Creating virtual environment..."
-"$PYTHON" -m venv "$VENV_DIR"
-PIP="${VENV_DIR}/bin/pip"
-PYTHON_VENV="${VENV_DIR}/bin/python"
-info "Installing Telethon..."
-"$PIP" install --quiet --upgrade pip
-"$PIP" install --quiet telethon
-success "Telethon installed"
-
-# ── Instructions ──────────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}Ready!${RESET}"
-echo -e "  1. Send your backup files to the bot in Telegram"
-echo -e "  2. Send ${BOLD}/done${RESET} when finished — bot shuts down and cleans up"
-echo ""
-
-# ── Run bot ───────────────────────────────────────────────────────────────────
-API_ID="$API_ID" \
-API_HASH="$API_HASH" \
-BOT_TOKEN="$BOT_TOKEN" \
-ALLOWED_CHAT="$ALLOWED_CHAT" \
-DOWNLOAD_DIR="$DOWNLOAD_DIR" \
-DOWNLOAD_WORKERS="$DOWNLOAD_WORKERS" \
-    "$PYTHON_VENV" "$BOT_SCRIPT"
-
-# trap cleanup fires here automatically
