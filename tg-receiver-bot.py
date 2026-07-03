@@ -123,39 +123,136 @@ async def run_bot(tmp_dir: Path) -> None:
     log.info("Workers     : %s parallel chunks", DOWNLOAD_WORKERS)
     log.info("Ready — send files, then /done to stop.")
 
-    # ── Message handler ───────────────────────────────────────────────────────
+    # ── Queue State ───────────────────────────────────────────────────────────
+    download_queue: asyncio.Queue = asyncio.Queue()
+    done_received = False
+    done_event = None
+    current_download_active = False
 
-    @bot.on(events.NewMessage(chats=ALLOWED_CHAT))
-    async def on_message(event):
-        msg = event.message
+    async def shutdown(evt):
+        if downloaded:
+            log.info("Moving %d file(s) to %s ...", len(downloaded), DOWNLOAD_DIR)
+            moved = []
+            for tmp_path, final_path in downloaded:
+                try:
+                    if tmp_path.exists():
+                        shutil.move(str(tmp_path), str(final_path))
+                        moved.append(final_path)
+                        log.info("  → %s", final_path.name)
+                except Exception as e:
+                    log.error("Failed to move %s: %s", tmp_path, e)
+            summary = "\n".join(
+                f"  • {p.name}  ({p.stat().st_size / 1_048_576:.1f} MB)"
+                for p in moved
+            )
+        else:
+            summary = "  (none)"
 
-        # ── /done ─────────────────────────────────────────────────────────────
-        if msg.text and msg.text.strip().lower() == "/done":
-            if downloaded:
-                log.info("Moving %d file(s) to %s ...", len(downloaded), DOWNLOAD_DIR)
-                moved = []
-                for tmp_path, final_path in downloaded:
-                    shutil.move(str(tmp_path), str(final_path))
-                    moved.append(final_path)
-                    log.info("  → %s", final_path.name)
-                summary = "\n".join(
-                    f"  • {p.name}  ({p.stat().st_size / 1_048_576:.1f} MB)"
-                    for p in moved
-                )
-            else:
-                summary = "  (none)"
-
-            await event.reply(
+        try:
+            await evt.reply(
                 f"✅ Done! {len(downloaded)} file(s) saved to:\n"
                 f"`{DOWNLOAD_DIR}`\n\n{summary}\n\n🛑 Shutting down.",
                 parse_mode="md",
             )
-            log.info("/done — shutting down.")
-            stop_event.set()
+        except Exception as e:
+            log.error("Failed to send shutdown message: %s", e)
+        log.info("/done — shutting down.")
+        stop_event.set()
+
+    # ── Background Download Worker ────────────────────────────────────────────
+    async def download_worker():
+        nonlocal current_download_active
+        while not stop_event.is_set():
+            try:
+                try:
+                    task = await asyncio.wait_for(download_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if done_received and download_queue.empty() and not current_download_active:
+                        if done_event:
+                            await shutdown(done_event)
+                        break
+                    continue
+
+                current_download_active = True
+                msg, event, file_name, size_bytes, tmp_dest, final_dest = task
+
+                try:
+                    size_str = f"{size_bytes / 1_048_576:.1f} MB" if size_bytes else "unknown size"
+                    log.info("Downloading: %s  (%s)", file_name, size_str)
+                    status_msg = await event.reply(
+                        f"⬇️ Downloading: `{file_name}`  ({size_str})", parse_mode="md"
+                    )
+
+                    t0 = time.monotonic()
+                    progress = Progress(file_name, size_bytes)
+
+                    await bot.download_media(
+                        msg,
+                        file=str(tmp_dest),
+                        progress_callback=progress,
+                    )
+                    print()  # newline after progress bar
+
+                    elapsed = time.monotonic() - t0 or 0.001
+                    final_mb = tmp_dest.stat().st_size / 1_048_576
+                    avg_speed = final_mb / elapsed
+
+                    log.info(
+                        "Finished: %s  (%.1f MB in %.1fs — avg %.1f MB/s)",
+                        file_name, final_mb, elapsed, avg_speed,
+                    )
+                    await status_msg.reply(
+                        f"✅ `{file_name}` — {final_mb:.1f} MB in {elapsed:.0f}s "
+                        f"({avg_speed:.1f} MB/s avg)\n"
+                        f"Will be moved to final location on /done",
+                        parse_mode="md",
+                    )
+                    downloaded.append((tmp_dest, final_dest))
+                except Exception as e:
+                    log.error("Failed to download %s: %s", file_name, e)
+                    await event.reply(
+                        f"❌ Failed to download `{file_name}`: {e}",
+                        parse_mode="md"
+                    )
+                finally:
+                    current_download_active = False
+                    download_queue.task_done()
+
+                if done_received and download_queue.empty() and not current_download_active:
+                    if done_event:
+                        await shutdown(done_event)
+                    break
+            except Exception as e:
+                log.error("Error in download worker: %s", e)
+
+    worker_task = asyncio.create_task(download_worker())
+
+    # ── Message handler ───────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(chats=ALLOWED_CHAT))
+    async def on_message(event):
+        nonlocal done_received, done_event
+        msg = event.message
+
+        # ── /done ─────────────────────────────────────────────────────────────
+        if msg.text and msg.text.strip().lower() == "/done":
+            done_received = True
+            done_event = event
+            if download_queue.empty() and not current_download_active:
+                await shutdown(event)
+            else:
+                q_size = download_queue.qsize() + (1 if current_download_active else 0)
+                await event.reply(
+                    f"⏳ Done command received. Waiting for {q_size} remaining download(s) to complete...",
+                    parse_mode="md",
+                )
             return
 
         # ── File message ──────────────────────────────────────────────────────
         if not msg.media:
+            return
+
+        if done_received:
+            await event.reply("⚠️ Bot is shutting down. No new downloads accepted.", parse_mode="md")
             return
 
         # Resolve file name + size
@@ -170,47 +267,32 @@ async def run_bot(tmp_dir: Path) -> None:
                 f"document_{msg.id}",
             )
         elif isinstance(msg.media, MessageMediaPhoto):
-            file_name  = f"photo_{msg.id}.jpg"
+            file_name = f"photo_{msg.id}.jpg"
         else:
-            file_name  = f"media_{msg.id}"
+            file_name = f"media_{msg.id}"
 
-        size_str  = f"{size_bytes / 1_048_576:.1f} MB" if size_bytes else "unknown size"
-        tmp_dest  = unique_path(tmp_dir, file_name)
+        size_str = f"{size_bytes / 1_048_576:.1f} MB" if size_bytes else "unknown size"
+        tmp_dest = unique_path(tmp_dir, file_name)
         final_dest = unique_path(DOWNLOAD_DIR, file_name)
 
-        log.info("Downloading: %s  (%s)", file_name, size_str)
+        pos = download_queue.qsize() + 1
+        if current_download_active:
+            pos += 1
+
+        await download_queue.put((msg, event, file_name, size_bytes, tmp_dest, final_dest))
+        
+        log.info("Queued: %s  (%s) [Position: %d]", file_name, size_str, pos)
         await event.reply(
-            f"⬇️ Downloading: `{file_name}`  ({size_str})", parse_mode="md"
+            f"📥 Queued: `{file_name}`  ({size_str}) [Position: {pos}]", parse_mode="md"
         )
-
-        t0       = time.monotonic()
-        progress = Progress(file_name, size_bytes)
-
-        await bot.download_media(
-            msg,
-            file=str(tmp_dest),
-            progress_callback=progress,
-        )
-        print()  # newline after progress bar
-
-        elapsed   = time.monotonic() - t0 or 0.001
-        final_mb  = tmp_dest.stat().st_size / 1_048_576
-        avg_speed = final_mb / elapsed
-
-        log.info(
-            "Finished: %s  (%.1f MB in %.1fs — avg %.1f MB/s)",
-            file_name, final_mb, elapsed, avg_speed,
-        )
-        await event.reply(
-            f"✅ `{file_name}` — {final_mb:.1f} MB in {elapsed:.0f}s "
-            f"({avg_speed:.1f} MB/s avg)\n"
-            f"Will be moved to final location on /done",
-            parse_mode="md",
-        )
-        downloaded.append((tmp_dest, final_dest))
 
     # ── Wait ──────────────────────────────────────────────────────────────────
     await stop_event.wait()
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
     await bot.disconnect()
 
 
