@@ -1,36 +1,34 @@
 #!/usr/bin/env bash
 #
-# restore.sh
+# restore.sh - restores a pg-node instance from a backup archive.
 #
-# Downloads a backup archive, installs Docker (if needed), restores
-# /opt/pg-node and /var/lib/pg-node from the archive, and brings the
-# Docker Compose stack back up.
-#
-# The backup URL is NOT hardcoded in this script. Provide it either:
-#   1) With the -b flag:   sudo ./restore.sh -b https://example.com/backup.tar.gz
-#   2) Interactively: just run "sudo ./restore.sh" and you'll be prompted.
+# Flow:
+#   1) Repair broken dpkg/apt state.
+#   2) Install Docker + base pg-node scaffolding via the official
+#      PasarGuard installer (non-interactive, no systemd service).
+#   3) Stop the installer's default stack.
+#   4) Download and extract the real backup over /opt/pg-node and
+#      /var/lib/pg-node, replacing the default config.
+#   5) Pull images and bring the restored stack up.
+#   6) Show a "docker ps" snapshot, then follow logs (Ctrl+C to stop
+#      watching; the stack keeps running).
 #
 # Usage:
 #   sudo ./restore.sh -b <backup-url>
-#   sudo ./restore.sh              # will prompt for the URL
+#   sudo ./restore.sh              # prompts for the URL
 #
 set -Eeuo pipefail
 
-# BACKUP_URL is populated at runtime from the -b flag or an interactive
-# prompt (see resolve_backup_url below). Do not hardcode it here.
+# Set via -b flag or interactive prompt (see resolve_backup_url).
 BACKUP_URL=""
 
-# --------------------------------------------------------------------------
-# Constants
-# --------------------------------------------------------------------------
 readonly APP_DIR="/opt/pg-node"
 readonly DATA_DIR="/var/lib/pg-node"
 readonly TMP_ARCHIVE="/tmp/pg-node-backup.tar.gz"
 readonly STARTUP_WAIT_SECONDS=10
+readonly LOG_FILE="/var/log/pg-node-restore.log"
+readonly PG_NODE_INSTALLER_URL="https://github.com/PasarGuard/scripts/raw/main/pg-node.sh"
 
-# --------------------------------------------------------------------------
-# Colors
-# --------------------------------------------------------------------------
 readonly COLOR_RED="\033[0;31m"
 readonly COLOR_GREEN="\033[0;32m"
 readonly COLOR_YELLOW="\033[0;33m"
@@ -42,30 +40,62 @@ log_ok()    { echo -e "${COLOR_GREEN}[ OK ]${COLOR_RESET} $*"; }
 log_warn()  { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $*"; }
 log_err()   { echo -e "${COLOR_RED}[FAIL]${COLOR_RESET} $*" >&2; }
 
-# --------------------------------------------------------------------------
-# Error handling
-# --------------------------------------------------------------------------
+# Runs a command with output hidden (only a spinner is shown); full output
+# goes to LOG_FILE.
+run_quiet() {
+    local desc="$1"
+    shift
+
+    echo "----- $(date '+%Y-%m-%d %H:%M:%S') :: ${desc} -----" >> "${LOG_FILE}"
+
+    ( "$@" ) >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+
+    if [[ -t 1 ]]; then
+        local frames='|/-\'
+        local i=0
+        while kill -0 "${pid}" 2>/dev/null; do
+            i=$(( (i + 1) % 4 ))
+            printf "\r${COLOR_BLUE}[....]${COLOR_RESET} %s %s" "${desc}" "${frames:$i:1}"
+            sleep 0.2
+        done
+    else
+        printf "${COLOR_BLUE}[....]${COLOR_RESET} %s\n" "${desc}"
+    fi
+
+    wait "${pid}"
+    local exit_code=$?
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+        printf "\r${COLOR_GREEN}[ OK ]${COLOR_RESET} %s\n" "${desc}"
+    else
+        printf "\r${COLOR_RED}[FAIL]${COLOR_RESET} %s (see: %s)\n" "${desc}" "${LOG_FILE}"
+    fi
+
+    return "${exit_code}"
+}
+
 on_error() {
     local exit_code=$?
-    log_err "An error occurred (exit code ${exit_code}) on line ${BASH_LINENO[0]}."
+    log_err "Error (exit code ${exit_code}) on line ${BASH_LINENO[0]}. See ${LOG_FILE}"
     exit "${exit_code}"
 }
 trap on_error ERR
 
-# --------------------------------------------------------------------------
-# Checks
-# --------------------------------------------------------------------------
+init_log() {
+    mkdir -p "$(dirname "${LOG_FILE}")"
+    : > "${LOG_FILE}"
+    log_info "Logging full output to: ${LOG_FILE}"
+}
 
-# 1. Verify root privileges
 check_root() {
     if [[ "${EUID}" -ne 0 ]]; then
         log_err "This script must be run as root (use sudo)."
         exit 1
     fi
-    log_ok "Running with root privileges."
+    log_ok "Running as root."
 }
 
-# Detect distro; only Ubuntu/Debian are supported.
 detect_distro() {
     if [[ ! -f /etc/os-release ]]; then
         log_err "Cannot detect operating system (/etc/os-release missing)."
@@ -78,7 +108,7 @@ detect_distro() {
 
     case "${DISTRO_ID} ${DISTRO_ID_LIKE}" in
         *ubuntu*|*debian*)
-            log_ok "Detected supported distribution: ${PRETTY_NAME:-$DISTRO_ID}"
+            log_ok "Detected: ${PRETTY_NAME:-$DISTRO_ID}"
             ;;
         *)
             log_err "Unsupported distribution: ${PRETTY_NAME:-$DISTRO_ID}. Only Ubuntu/Debian are supported."
@@ -87,108 +117,93 @@ detect_distro() {
     esac
 }
 
-# Detect which downloader is available (curl or wget). Install curl if neither is found.
-DOWNLOADER=""
-detect_downloader() {
-    if command -v curl &>/dev/null; then
-        DOWNLOADER="curl"
-    elif command -v wget &>/dev/null; then
-        DOWNLOADER="wget"
-    else
-        log_warn "Neither curl nor wget found. Installing curl..."
-        apt-get update -y
-        apt-get install -y curl
-        DOWNLOADER="curl"
-    fi
-    log_ok "Using ${DOWNLOADER} for downloads."
-}
+# Repairs an interrupted/broken dpkg state before any package install runs.
+repair_broken_packages() {
+    log_info "Checking package manager state..."
+    export DEBIAN_FRONTEND=noninteractive
 
-# --------------------------------------------------------------------------
-# Docker installation
-# --------------------------------------------------------------------------
+    run_quiet "Reconfiguring half-installed packages" dpkg --configure -a || true
+    run_quiet "Fixing broken dependencies" apt-get install -f -y || true
+    run_quiet "Updating package lists" apt-get update -y || true
+    run_quiet "Reconfiguring packages (retry)" dpkg --configure -a || true
 
-# 2. Install Docker Engine and Docker Compose plugin if missing.
-install_docker() {
-    if command -v docker &>/dev/null && docker compose version &>/dev/null; then
-        log_ok "Docker and Docker Compose plugin already installed."
-        return
-    fi
-
-    log_info "Installing Docker Engine and Docker Compose plugin..."
-
-    apt-get update -y
-    apt-get install -y ca-certificates curl gnupg lsb-release
-
-    install -m 0755 -d /etc/apt/keyrings
-
-    # Add Docker's official GPG key (idempotent).
-    if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
-        curl -fsSL "https://download.docker.com/linux/${DISTRO_ID}/gpg" \
-            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        chmod a+r /etc/apt/keyrings/docker.gpg
-    fi
-
-    # Add Docker apt repository.
-    local arch
-    arch="$(dpkg --print-architecture)"
-    local codename
-    codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
-
-    echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DISTRO_ID} ${codename} stable" \
-        > /etc/apt/sources.list.d/docker.list
-
-    apt-get update -y
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    systemctl enable docker
-    systemctl start docker
-
-    if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null; then
-        log_err "Docker installation failed."
+    if ! run_quiet "Fixing broken dependencies (final)" apt-get install -f -y; then
+        log_err "Unable to automatically repair the package state. Run manually:"
+        log_err "  sudo dpkg --configure -a && sudo apt-get install -f -y && sudo apt-get update"
         exit 1
     fi
 
-    log_ok "Docker Engine and Docker Compose plugin installed successfully."
+    log_ok "Package manager state is healthy."
 }
 
-# --------------------------------------------------------------------------
-# Restore steps
-# --------------------------------------------------------------------------
+# The official installer bootstraps itself with curl.
+ensure_curl() {
+    if command -v curl &>/dev/null; then
+        return
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    run_quiet "Updating package lists" apt-get update -y
+    run_quiet "Installing curl" apt-get install -y curl
+}
 
-# Resolve the backup URL, in order of priority:
-#   1) The -b flag (sudo ./restore.sh -b <url>)
-#   2) Interactive prompt (asks the user to type/paste the URL)
+# Runs the official PasarGuard pg-node installer non-interactively.
+# Installs Docker, Compose, jq, yq, and the base APP_DIR/DATA_DIR scaffolding.
+_install_pg_node_official() {
+    bash -c "$(curl -fsSL "${PG_NODE_INSTALLER_URL}")" @ install -y --no-install-service
+}
+
+install_pg_node_official() {
+    log_info "Installing pg-node (Docker + base scaffolding) via the official installer..."
+    if ! run_quiet "Running official pg-node.sh installer" _install_pg_node_official; then
+        log_err "The official pg-node.sh installer failed. See ${LOG_FILE}"
+        exit 1
+    fi
+
+    if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null; then
+        log_err "Docker does not appear to be installed correctly."
+        exit 1
+    fi
+    if [[ ! -f "${APP_DIR}/docker-compose.yml" ]]; then
+        log_err "Installer did not create docker-compose.yml in ${APP_DIR}."
+        exit 1
+    fi
+
+    log_ok "Base pg-node installation complete."
+}
+
+# Stops the installer's default stack before overwriting its config.
+_stop_default_stack() {
+    cd "${APP_DIR}"
+    docker compose down
+}
+
+stop_default_stack() {
+    run_quiet "Stopping default stack" _stop_default_stack
+}
+
+# Resolves BACKUP_URL: -b flag, then interactive prompt.
 resolve_backup_url() {
-    # 1) Already set from the -b flag by parse_args().
     if [[ -n "${BACKUP_URL}" ]]; then
-        log_ok "Using backup URL provided via -b flag."
+        log_ok "Using backup URL from -b flag."
         return
     fi
 
-    # 2) Ask the user interactively. Requires an interactive terminal.
     if [[ -t 0 ]]; then
         while [[ -z "${BACKUP_URL}" ]]; do
             read -r -p "$(echo -e "${COLOR_BLUE}[INPUT]${COLOR_RESET} Enter the backup download URL: ")" BACKUP_URL
-            if [[ -z "${BACKUP_URL}" ]]; then
-                log_warn "URL cannot be empty. Please try again."
-            fi
+            [[ -z "${BACKUP_URL}" ]] && log_warn "URL cannot be empty."
         done
     else
-        log_err "No backup URL provided and no interactive terminal available to prompt for it."
+        log_err "No backup URL provided and no interactive terminal available."
         log_err "Run with: sudo ./restore.sh -b <backup-url>"
         exit 1
     fi
 }
 
-# Parse command-line options.
-#   -b <url>   backup archive URL
-#   -h         show usage
 parse_args() {
     while getopts ":b:h" opt; do
         case "${opt}" in
-            b)
-                BACKUP_URL="${OPTARG}"
-                ;;
+            b) BACKUP_URL="${OPTARG}" ;;
             h)
                 echo "Usage: sudo $0 -b <backup-url>"
                 exit 0
@@ -207,14 +222,27 @@ parse_args() {
     done
 }
 
-# 3. Download the backup archive.
+DOWNLOADER=""
+detect_downloader() {
+    if command -v curl &>/dev/null; then
+        DOWNLOADER="curl"
+    elif command -v wget &>/dev/null; then
+        DOWNLOADER="wget"
+    else
+        export DEBIAN_FRONTEND=noninteractive
+        run_quiet "Installing curl" apt-get install -y curl
+        DOWNLOADER="curl"
+    fi
+    log_ok "Using ${DOWNLOADER} for downloads."
+}
+
 download_backup() {
-    log_info "Downloading backup from ${BACKUP_URL}..."
+    log_info "Downloading backup..."
 
     if [[ "${DOWNLOADER}" == "curl" ]]; then
-        curl -fL --retry 3 -o "${TMP_ARCHIVE}" "${BACKUP_URL}"
+        run_quiet "Downloading backup file" curl -fL --retry 3 -o "${TMP_ARCHIVE}" "${BACKUP_URL}"
     else
-        wget --tries=3 -O "${TMP_ARCHIVE}" "${BACKUP_URL}"
+        run_quiet "Downloading backup file" wget --tries=3 -O "${TMP_ARCHIVE}" "${BACKUP_URL}"
     fi
 
     if [[ ! -s "${TMP_ARCHIVE}" ]]; then
@@ -222,75 +250,66 @@ download_backup() {
         exit 1
     fi
 
-    log_ok "Backup downloaded to ${TMP_ARCHIVE}."
+    log_ok "Backup downloaded: ${TMP_ARCHIVE}"
 }
 
-# 4. Create target directories.
-create_dirs() {
-    log_info "Creating target directories..."
-    mkdir -p "${APP_DIR}" "${DATA_DIR}"
-    log_ok "Directories ${APP_DIR} and ${DATA_DIR} ready."
-}
-
-# 5. Extract the archive to /.
 extract_backup() {
-    log_info "Extracting backup archive to /..."
-    tar -xzpf "${TMP_ARCHIVE}" -C /
-    log_ok "Archive extracted."
+    run_quiet "Extracting backup (replacing default config)" tar -xzpf "${TMP_ARCHIVE}" -C /
 }
 
-# 6-7. Start the Docker Compose stack.
 start_stack() {
     if [[ ! -f "${APP_DIR}/docker-compose.yml" ]]; then
         log_err "docker-compose.yml not found in ${APP_DIR} after extraction."
         exit 1
     fi
 
-    log_info "Pulling images and starting stack..."
     cd "${APP_DIR}"
-    docker compose pull
-    docker compose up -d
-    log_ok "Stack started."
+    run_quiet "Pulling Docker images" docker compose pull
+    run_quiet "Starting services" docker compose up -d
 }
 
-# 8-9. Wait, then show running containers.
 show_status() {
-    log_info "Waiting ${STARTUP_WAIT_SECONDS} seconds for services to come up..."
+    log_info "Waiting ${STARTUP_WAIT_SECONDS}s for services to come up..."
     sleep "${STARTUP_WAIT_SECONDS}"
     echo
     docker ps
     echo
 }
 
-# 10. Delete downloaded archive.
 cleanup() {
-    log_info "Cleaning up downloaded archive..."
     rm -f "${TMP_ARCHIVE}"
-    log_ok "Temporary archive removed."
 }
 
-# 11. Final success message (green).
 print_success() {
     echo -e "${COLOR_GREEN}Restore completed successfully.${COLOR_RESET}"
 }
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
+# Follows the stack's logs (not run_quiet: the point is to show live output).
+follow_logs() {
+    cd "${APP_DIR}"
+    log_info "Following logs. Press Ctrl+C to stop watching (the stack keeps running)."
+    echo
+    docker compose logs -f || true
+}
+
 main() {
     parse_args "$@"
     check_root
+    init_log
     detect_distro
+    repair_broken_packages
+    ensure_curl
+    install_pg_node_official
+    stop_default_stack
     detect_downloader
-    install_docker
     resolve_backup_url
     download_backup
-    create_dirs
     extract_backup
     start_stack
     show_status
     cleanup
     print_success
+    follow_logs
 }
 
 main "$@"
