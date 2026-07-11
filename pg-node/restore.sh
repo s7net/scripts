@@ -10,7 +10,8 @@
 #   4) Download and extract the real backup over /opt/pg-node and
 #      /var/lib/pg-node, replacing the default config.
 #   5) Pull images and bring the restored stack up.
-#   6) Show a "docker ps" snapshot, then follow logs (Ctrl+C to stop
+#   6) Block known-abuse IP ranges via iptables (Abuse-Defender source).
+#   7) Show a "docker ps" snapshot, then follow logs (Ctrl+C to stop
 #      watching; the stack keeps running).
 #
 # Usage:
@@ -28,6 +29,11 @@ readonly TMP_ARCHIVE="/tmp/pg-node-backup.tar.gz"
 readonly STARTUP_WAIT_SECONDS=10
 readonly LOG_FILE="/var/log/pg-node-restore.log"
 readonly PG_NODE_INSTALLER_URL="https://github.com/PasarGuard/scripts/raw/main/pg-node.sh"
+
+# Abuse-Defender integration (https://github.com/Kiya6955/Abuse-Defender)
+readonly ABUSE_IP_LIST_URL="https://raw.githubusercontent.com/Kiya6955/Abuse-Defender/main/abuse-ips.ipv4"
+readonly ABUSE_CHAIN="abuse-defender"
+readonly ABUSE_UPDATE_SCRIPT="/root/abuse-defender-update.sh"
 
 readonly COLOR_RED="\033[0;31m"
 readonly COLOR_GREEN="\033[0;32m"
@@ -268,6 +274,85 @@ start_stack() {
     run_quiet "Starting services" docker compose up -d
 }
 
+# ---------------------------------------------------------------------------
+# Abuse-Defender integration (https://github.com/Kiya6955/Abuse-Defender)
+# Blocks known-abuse IP ranges via a dedicated iptables chain, non-interactively.
+# ---------------------------------------------------------------------------
+
+_ensure_iptables_stack() {
+    if ! command -v iptables &>/dev/null; then
+        apt-get update -y
+        apt-get install -y iptables
+    fi
+    if ! dpkg -s iptables-persistent &>/dev/null; then
+        apt-get update -y
+        apt-get install -y iptables-persistent
+    fi
+    mkdir -p /etc/iptables
+}
+
+_setup_abuse_chain() {
+    if ! iptables -L "${ABUSE_CHAIN}" -n >/dev/null 2>&1; then
+        iptables -N "${ABUSE_CHAIN}"
+    fi
+    if ! iptables -L OUTPUT -n | awk '{print $1}' | grep -wq "^${ABUSE_CHAIN}\$"; then
+        iptables -I OUTPUT -j "${ABUSE_CHAIN}"
+    fi
+}
+
+_populate_abuse_chain() {
+    iptables -F "${ABUSE_CHAIN}"
+
+    local ip_list
+    ip_list=$(curl -fsSL "${ABUSE_IP_LIST_URL}")
+    if [[ -z "${ip_list}" ]]; then
+        echo "Failed to fetch abuse IP-range list from ${ABUSE_IP_LIST_URL}" >&2
+        return 1
+    fi
+
+    local ip
+    for ip in ${ip_list}; do
+        iptables -A "${ABUSE_CHAIN}" -d "${ip}" -j DROP
+    done
+
+    echo '127.0.0.1 appclick.co' | tee -a /etc/hosts >/dev/null
+    echo '127.0.0.1 pushnotificationws.com' | tee -a /etc/hosts >/dev/null
+
+    iptables-save > /etc/iptables/rules.v4
+}
+
+# Installs a daily cron job that refreshes the abuse-IP list, mirroring
+# Abuse-Defender's own auto-update option.
+_setup_abuse_auto_update() {
+    cat <<EOF >"${ABUSE_UPDATE_SCRIPT}"
+#!/bin/bash
+iptables -F ${ABUSE_CHAIN}
+IP_LIST=\$(curl -fsSL '${ABUSE_IP_LIST_URL}')
+for IP in \$IP_LIST; do
+    iptables -A ${ABUSE_CHAIN} -d \$IP -j DROP
+done
+iptables-save > /etc/iptables/rules.v4
+EOF
+    chmod +x "${ABUSE_UPDATE_SCRIPT}"
+
+    crontab -l 2>/dev/null | grep -v "${ABUSE_UPDATE_SCRIPT}" | crontab - || true
+    (crontab -l 2>/dev/null; echo "0 0 * * * ${ABUSE_UPDATE_SCRIPT}") | crontab -
+}
+
+block_abuse_ips() {
+    log_info "Blocking known-abuse IP ranges (Abuse-Defender)..."
+    run_quiet "Installing iptables/iptables-persistent" _ensure_iptables_stack
+    run_quiet "Setting up abuse-defender chain" _setup_abuse_chain
+
+    if ! run_quiet "Fetching and applying abuse IP-range list" _populate_abuse_chain; then
+        log_warn "Could not apply abuse IP-range list; continuing without it."
+        return
+    fi
+
+    run_quiet "Enabling daily abuse-list auto-update" _setup_abuse_auto_update
+    log_ok "Abuse IP-ranges blocked."
+}
+
 show_status() {
     log_info "Waiting ${STARTUP_WAIT_SECONDS}s for services to come up..."
     sleep "${STARTUP_WAIT_SECONDS}"
@@ -306,6 +391,7 @@ main() {
     download_backup
     extract_backup
     start_stack
+    block_abuse_ips
     show_status
     cleanup
     print_success
