@@ -17,3 +17,8 @@ bash <(curl -Ls https://script.s7net.ir/pg-node/backup.sh)
 ```bash
 bash <(curl -Ls https://script.s7net.ir/pg-node/restore.sh)
 ```
+
+### startfish shell
+```bash
+bash <(curl -Ls https://script.s7net.ir/shell/starfish.sh)
+```
