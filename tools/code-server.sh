@@ -26,6 +26,14 @@ password: $PASSWORD
 cert: false
 EOF
 
+# --- set default theme to Dark 2026 ---
+mkdir -p /root/.local/share/code-server/User
+cat >/root/.local/share/code-server/User/settings.json <<EOF
+{
+  "workbench.colorTheme": "Dark 2026"
+}
+EOF
+
 systemctl daemon-reload
 systemctl enable --now code-server@root
 
@@ -41,11 +49,9 @@ echo
 echo "[Live logs below] Type STOP and press Enter at any time to stop the service."
 echo "-----------------------------------------------------------"
 
-# --- stream logs live in background ---
 journalctl -u code-server@root -f --no-pager &
 LOG_PID=$!
 
-# --- wait for user to type STOP (in parallel with logs) ---
 while true; do
     read -rp "" CONFIRM
     if [[ "$CONFIRM" == "STOP" ]]; then
@@ -53,18 +59,15 @@ while true; do
     fi
 done
 
-# --- stop the log stream ---
 kill "$LOG_PID" 2>/dev/null || true
 wait "$LOG_PID" 2>/dev/null || true
 
 echo
 echo "[+] Stopping code-server (files will not be removed)..."
 
-# stop the systemd-managed instance
 systemctl stop code-server@root 2>/dev/null || true
 systemctl disable code-server@root 2>/dev/null || true
 
-# also kill any manually-started or orphaned code-server processes
 pkill -f "code-server" 2>/dev/null || true
 sleep 1
 pkill -9 -f "code-server" 2>/dev/null || true
