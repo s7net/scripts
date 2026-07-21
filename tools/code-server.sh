@@ -58,9 +58,11 @@ echo "-----------------------------------------------------------"
 
 STOPPING=0
 LOG_PID=""
+HANDLING=0
 
 start_logs() {
-    ( trap '' INT; journalctl -u code-server@root -f --no-pager ) &
+    pkill -f "journalctl -u code-server@root" 2>/dev/null || true
+    ( trap '' INT; exec journalctl -u code-server@root -f --no-pager ) &
     LOG_PID=$!
 }
 
@@ -70,9 +72,15 @@ stop_logs() {
         wait "$LOG_PID" 2>/dev/null || true
         LOG_PID=""
     fi
+    pkill -f "journalctl -u code-server@root" 2>/dev/null || true
 }
 
 confirm_stop() {
+    if [[ "$HANDLING" -eq 1 ]]; then
+        return
+    fi
+    HANDLING=1
+    trap '' SIGINT
     stop_logs
     echo
     read -rp "Are you sure you want to stop code-server? (y/n): " ans
@@ -81,6 +89,8 @@ confirm_stop() {
     else
         echo "Resuming logs... (press Ctrl+C again to stop)"
         start_logs
+        HANDLING=0
+        trap confirm_stop SIGINT
     fi
 }
 
@@ -91,6 +101,7 @@ while [[ "$STOPPING" -eq 0 ]]; do
     sleep 1
 done
 
+stop_logs
 echo
 echo "[+] Stopping code-server (files will not be removed)..."
 systemctl stop code-server@root 2>/dev/null || true
