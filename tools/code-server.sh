@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
+PORT=39217
+
+if systemctl is-active --quiet code-server@root 2>/dev/null; then
+    systemctl stop code-server@root
+fi
+
 PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)
 
-# --- pick a random free port ---
-find_free_port() {
-    while true; do
-        PORT=$(shuf -i 20000-65000 -n 1)
-        if ! ss -tuln | awk '{print $5}' | grep -q ":$PORT\$"; then
-            echo "$PORT"
-            return
-        fi
-    done
-}
-PORT=$(find_free_port)
-
-# --- install only if not already installed ---
 if command -v code-server >/dev/null 2>&1; then
     echo "[+] code-server is already installed, skipping installation."
 else
@@ -31,7 +24,6 @@ password: $PASSWORD
 cert: false
 EOF
 
-# --- set default theme to Dark 2026 ---
 mkdir -p /root/.local/share/code-server/User
 cat >/root/.local/share/code-server/User/settings.json <<EOF
 {
@@ -40,7 +32,17 @@ cat >/root/.local/share/code-server/User/settings.json <<EOF
 EOF
 
 systemctl daemon-reload
-systemctl enable --now code-server@root
+systemctl enable code-server@root
+systemctl restart code-server@root
+
+sleep 2
+
+if ! ss -tuln | awk '{print $5}' | grep -q ":$PORT\$"; then
+    echo "[!] code-server failed to start on port $PORT."
+    echo "[!] Recent logs:"
+    journalctl -u code-server@root -n 30 --no-pager
+    exit 1
+fi
 
 IP=$(hostname -I | awk '{print $1}')
 clear
@@ -83,7 +85,6 @@ confirm_stop() {
 }
 
 trap confirm_stop SIGINT
-
 start_logs
 
 while [[ "$STOPPING" -eq 0 ]]; do
@@ -92,13 +93,10 @@ done
 
 echo
 echo "[+] Stopping code-server (files will not be removed)..."
-
 systemctl stop code-server@root 2>/dev/null || true
 systemctl disable code-server@root 2>/dev/null || true
-
 pkill -f "code-server" 2>/dev/null || true
 sleep 1
 pkill -9 -f "code-server" 2>/dev/null || true
-
 echo
 echo "Done. code-server has been fully stopped (installation and files remain intact)."
