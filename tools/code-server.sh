@@ -46,21 +46,45 @@ echo " URL      : http://$IP:$PORT"
 echo " Password : $PASSWORD"
 echo "============================================="
 echo
-echo "[Live logs below] Type STOP and press Enter at any time to stop the service."
+echo "[Live logs below] Press Ctrl+C at any time to stop the service."
 echo "-----------------------------------------------------------"
 
-journalctl -u code-server@root -f --no-pager &
-LOG_PID=$!
+STOPPING=0
+LOG_PID=""
 
-while true; do
-    read -rp "" CONFIRM
-    if [[ "$CONFIRM" == "STOP" ]]; then
-        break
+start_logs() {
+    ( trap '' INT; journalctl -u code-server@root -f --no-pager ) &
+    LOG_PID=$!
+}
+
+stop_logs() {
+    if [[ -n "$LOG_PID" ]]; then
+        kill "$LOG_PID" 2>/dev/null || true
+        wait "$LOG_PID" 2>/dev/null || true
+        LOG_PID=""
     fi
-done
+}
 
-kill "$LOG_PID" 2>/dev/null || true
-wait "$LOG_PID" 2>/dev/null || true
+confirm_stop() {
+    # immediately silence logs so the prompt is clean
+    stop_logs
+    echo
+    read -rp "Are you sure you want to stop code-server? (y/n): " ans
+    if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+        STOPPING=1
+    else
+        echo "Resuming logs... (press Ctrl+C again to stop)"
+        start_logs
+    fi
+}
+
+trap confirm_stop SIGINT
+
+start_logs
+
+while [[ "$STOPPING" -eq 0 ]]; do
+    sleep 1
+done
 
 echo
 echo "[+] Stopping code-server (files will not be removed)..."
