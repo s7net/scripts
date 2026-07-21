@@ -22,3 +22,8 @@ bash <(curl -Ls https://script.s7net.ir/pg-node/restore.sh)
 ```bash
 bash <(curl -Ls https://script.s7net.ir/shell/starfish.sh)
 ```
+
+### code server
+```bash
+bash <(curl -Ls https://script.s7net.ir/tools/code-server.sh)
+```
