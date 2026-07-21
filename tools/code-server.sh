@@ -15,8 +15,13 @@ find_free_port() {
 }
 PORT=$(find_free_port)
 
-echo "[+] Installing code-server..."
-curl -fsSL https://code-server.dev/install.sh | sh
+# --- install only if not already installed ---
+if command -v code-server >/dev/null 2>&1; then
+    echo "[+] code-server is already installed, skipping installation."
+else
+    echo "[+] Installing code-server..."
+    curl -fsSL https://code-server.dev/install.sh | sh
+fi
 
 mkdir -p /root/.config/code-server
 cat >/root/.config/code-server/config.yaml <<EOF
@@ -66,7 +71,6 @@ stop_logs() {
 }
 
 confirm_stop() {
-    # immediately silence logs so the prompt is clean
     stop_logs
     echo
     read -rp "Are you sure you want to stop code-server? (y/n): " ans
