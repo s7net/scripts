@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-
 set -e
 
 PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)
+
+# --- pick a random free port ---
+find_free_port() {
+    while true; do
+        PORT=$(shuf -i 20000-65000 -n 1)
+        if ! ss -tuln | awk '{print $5}' | grep -q ":$PORT\$"; then
+            echo "$PORT"
+            return
+        fi
+    done
+}
+PORT=$(find_free_port)
 
 echo "[+] Installing code-server..."
 curl -fsSL https://code-server.dev/install.sh | sh
 
 mkdir -p /root/.config/code-server
-
 cat >/root/.config/code-server/config.yaml <<EOF
-bind-addr: 0.0.0.0:8443
+bind-addr: 0.0.0.0:$PORT
 auth: password
 password: $PASSWORD
 cert: false
@@ -20,37 +30,28 @@ systemctl daemon-reload
 systemctl enable --now code-server@root
 
 IP=$(hostname -I | awk '{print $1}')
-
 clear
 echo "============================================="
 echo " Code Server Ready"
 echo
-echo " URL      : http://$IP:8443"
+echo " URL      : http://$IP:$PORT"
 echo " Password : $PASSWORD"
 echo "============================================="
 echo
-read -rp "Press Enter when you are finished..."
 
-echo "[+] Removing code-server..."
+# --- wait for user to type STOP ---
+while true; do
+    read -rp "Type STOP and press Enter to stop the service: " CONFIRM
+    if [[ "$CONFIRM" == "STOP" ]]; then
+        break
+    else
+        echo "Invalid input. Please type STOP exactly."
+    fi
+done
 
+echo "[+] Stopping code-server (files will not be removed)..."
 systemctl stop code-server@root 2>/dev/null || true
 systemctl disable code-server@root 2>/dev/null || true
 
-rm -rf /root/.config/code-server
-rm -rf /root/.local/share/code-server
-rm -rf /root/.cache/code-server
-
-if command -v apt >/dev/null; then
-    apt remove -y code-server >/dev/null 2>&1 || true
-    apt purge -y code-server >/dev/null 2>&1 || true
-    apt autoremove -y >/dev/null 2>&1 || true
-fi
-
-rm -f /usr/bin/code-server
-rm -f /usr/lib/systemd/system/code-server@.service
-rm -rf /usr/lib/code-server
-
-systemctl daemon-reload
-
 echo
-echo "Done. code-server has been completely removed."
+echo "Done. code-server has been stopped, but installation and files remain intact."
